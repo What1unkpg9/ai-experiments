@@ -1,12 +1,31 @@
-#include "raylib.h"
+#define WIN32_LEAN_AND_MEAN
+#define NOGDI
+#define NOUSER
+
 #include <windows.h>
-#undef DrawText
 #include <shlobj.h>
 #include <commdlg.h>
+
+#ifdef Rectangle
+  #undef Rectangle
+#endif
+#ifdef CloseWindow
+  #undef CloseWindow
+#endif
+#ifdef ShowCursor
+  #undef ShowCursor
+#endif
+#ifdef DrawText
+  #undef DrawText
+#endif
+
+#include "raylib.h"
+
 #include <fstream>
 #include <vector>
 #include <string>
 #include <sstream>
+#include <iostream>
 #include <iostream> // Добавили для вывода в консоль
 
 struct MouseFrame {
