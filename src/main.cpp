@@ -1,31 +1,41 @@
+// 1. Подключаем Raylib ПЕРВЫМ (чистым, без макросов Windows)
+#include "raylib.h"
+
+// 2. Подключаем библиотеки Windows
 #define WIN32_LEAN_AND_MEAN
-
-// 1. Временно переименовываем конфликты WinAPI
-#define Rectangle WinRectangle
-#define CloseWindow WinCloseWindow
-#define ShowCursor WinShowCursor
-#define DrawText WinDrawText
-#define PlaySound WinPlaySound
-
 #include <windows.h>
 #include <shlobj.h>
 #include <commdlg.h>
 
-// 2. Освобождаем эти имена обратно для Raylib
-#undef Rectangle
-#undef CloseWindow
-#undef ShowCursor
-#undef DrawText
-#undef PlaySound
+// 3. Убиваем макросы Windows, которые ломают дальше код Raylib
+#ifdef Rectangle
+  #undef Rectangle
+#endif
+#ifdef CloseWindow
+  #undef CloseWindow
+#endif
+#ifdef ShowCursor
+  #undef ShowCursor
+#endif
+#ifdef DrawText
+  #undef DrawText
+#endif
+#ifdef DrawTextEx
+  #undef DrawTextEx
+#endif
+#ifdef LoadImage
+  #undef LoadImage
+#endif
+#ifdef PlaySound
+  #undef PlaySound
+#endif
 
-// 3. Подключаем Raylib и всё остальное
-#include "raylib.h"
-
+// 4. Подключаем C++ библиотеку
 #include <fstream>
 #include <vector>
 #include <string>
 #include <sstream>
-#include <iostream> // Добавили для вывода в консоль
+#include <iostream>
 
 struct MouseFrame {
     int x, y;
