@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include <windows.h>
+#undef DrawText
 #include <shlobj.h>
 #include <commdlg.h>
 #include <fstream>
