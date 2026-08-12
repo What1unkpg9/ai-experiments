@@ -16,6 +16,7 @@ extern "C" {
     #include <libswresample/swresample.h>
     #include <libavutil/avutil.h>
     #include <libavutil/imgutils.h>
+    #include <libavutil/channel_layout.h>
 }
 
 struct VideoPlayerState {
@@ -49,7 +50,7 @@ struct VideoPlayerState {
 
     // Control & Timing
     Uint64 last_frame_ticks = 0;
-    float volume = 0.6f; // По умолчанию 60%
+    float volume = 0.6f;
 };
 
 std::string FormatTime(double seconds) {
@@ -108,7 +109,7 @@ bool OpenVideo(const char* filepath, VideoPlayerState& state, SDL_Renderer* rend
     if (avformat_open_input(&state.fmt_ctx, filepath, nullptr, nullptr) < 0) return false;
     if (avformat_find_stream_info(state.fmt_ctx, nullptr) < 0) return false;
 
-    // 1. Настройка видеопотока
+    // 1. Видеопоток
     state.video_stream_idx = av_find_best_stream(state.fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (state.video_stream_idx >= 0) {
         AVStream* stream = state.fmt_ctx->streams[state.video_stream_idx];
@@ -146,7 +147,7 @@ bool OpenVideo(const char* filepath, VideoPlayerState& state, SDL_Renderer* rend
         }
     }
 
-    // 2. Настройка аудиопотока
+    // 2. Аудиопоток
     state.audio_stream_idx = av_find_best_stream(state.fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     if (state.audio_stream_idx >= 0) {
         AVStream* astream = state.fmt_ctx->streams[state.audio_stream_idx];
@@ -166,15 +167,22 @@ bool OpenVideo(const char* filepath, VideoPlayerState& state, SDL_Renderer* rend
                 if (state.audio_dev > 0) {
                     SDL_PauseAudioDevice(state.audio_dev, 0);
 
-                    uint64_t in_ch_layout = state.audio_codec_ctx->channel_layout;
-                    if (in_ch_layout == 0) in_ch_layout = av_get_default_channel_layout(state.audio_codec_ctx->channels);
+                    if (state.audio_codec_ctx->ch_layout.nb_channels == 0) {
+                        av_channel_layout_default(&state.audio_codec_ctx->ch_layout, 2);
+                    }
 
-                    state.swr_ctx = swr_alloc_set_opts(
-                        nullptr,
-                        AV_CH_LAYOUT_STEREO, AV_SAMPLE_FMT_S16, have.freq,
-                        in_ch_layout, state.audio_codec_ctx->sample_fmt, state.audio_codec_ctx->sample_rate,
+                    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+                    swr_alloc_set_opts2(
+                        &state.swr_ctx,
+                        &out_ch_layout,
+                        AV_SAMPLE_FMT_S16,
+                        have.freq,
+                        &state.audio_codec_ctx->ch_layout,
+                        state.audio_codec_ctx->sample_fmt,
+                        state.audio_codec_ctx->sample_rate,
                         0, nullptr
                     );
+
                     swr_init(state.swr_ctx);
                     state.audio_frame = av_frame_alloc();
                 }
@@ -251,7 +259,6 @@ void AdvancePlayback(VideoPlayerState& state) {
                             int16_t* samples = (int16_t*)out_buf;
                             int total_samples = converted * 2;
 
-                            // Регулировка громкости
                             for (int i = 0; i < total_samples; ++i) {
                                 int val = (int)(samples[i] * state.volume);
                                 if (val > 32767) val = 32767;
@@ -362,13 +369,12 @@ int main(int argc, char* argv[]) {
             ImGui::EndMainMenuBar();
         }
 
-        // Нижняя панель управления (VLC Style)
+        // Нижняя панель управления
         if (player.is_open) {
             ImGui::SetNextWindowPos(ImVec2(10.0f, (float)win_h - 90.0f));
             ImGui::SetNextWindowSize(ImVec2((float)win_w - 20.0f, 80.0f));
             ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
-            // Шкала времени (Timeline)
             float seek_pos = (float)player.current_time_sec;
             ImGui::PushItemWidth(-1);
             if (ImGui::SliderFloat("##time", &seek_pos, 0.0f, (float)player.duration_sec, "")) {
@@ -376,7 +382,6 @@ int main(int argc, char* argv[]) {
             }
             ImGui::PopItemWidth();
 
-            // Кнопка Пауза / Плей
             if (ImGui::Button(player.is_paused ? " Play " : "Pause")) {
                 player.is_paused = !player.is_paused;
                 if (player.audio_dev > 0) SDL_PauseAudioDevice(player.audio_dev, player.is_paused ? 1 : 0);
@@ -403,7 +408,6 @@ int main(int argc, char* argv[]) {
 
         ImGui::Render();
 
-        // Очистка экрана и отрисовка с сохранением пропорций Aspect Ratio
         SDL_SetRenderDrawColor(renderer, 10, 10, 10, 255);
         SDL_RenderClear(renderer);
 
