@@ -32,8 +32,7 @@ enum AspectRatioMode {
 
 enum LoopMode {
     LOOP_OFF = 0,
-    LOOP_ONE,
-    LOOP_ALL
+    LOOP_ONE
 };
 
 struct MediaDetails {
@@ -65,7 +64,7 @@ struct VideoPlayerState {
     double duration_sec = 0.0;
     double current_time_sec = 0.0;
     float playback_speed = 1.0f;
-    float volume = 0.6f; // До 2.0 (200%)
+    float volume = 0.7f;
 
     AspectRatioMode aspect_mode = ASPECT_AUTO;
     LoopMode loop_mode = LOOP_OFF;
@@ -75,13 +74,13 @@ struct VideoPlayerState {
     double ab_point_a = -1.0;
     double ab_point_b = -1.0;
 
-    // Audio Visualizer data
+    // Audio Visualizer peak value
     float audio_peak_level = 0.0f;
 
     MediaDetails details;
     OSDMessage osd;
 
-    // FFmpeg Video
+    // FFmpeg Video Contexts
     AVFormatContext* fmt_ctx = nullptr;
     AVCodecContext* video_codec_ctx = nullptr;
     int video_stream_idx = -1;
@@ -91,7 +90,7 @@ struct VideoPlayerState {
     uint8_t* video_buffer = nullptr;
     SDL_Texture* texture = nullptr;
 
-    // FFmpeg Audio
+    // FFmpeg Audio Contexts
     AVCodecContext* audio_codec_ctx = nullptr;
     int audio_stream_idx = -1;
     SwrContext* swr_ctx = nullptr;
@@ -101,13 +100,14 @@ struct VideoPlayerState {
     Uint64 last_frame_ticks = 0;
 };
 
-void ShowOSD(VideoPlayerState& state, const std::string& text, Uint32 duration_ms = 2200) {
+void ShowOSD(VideoPlayerState& state, const std::string& text, Uint32 duration_ms = 2000) {
     state.osd.text = text;
     state.osd.expire_ticks = SDL_GetTicks() + duration_ms;
 }
 
 std::string FormatTime(double seconds) {
     int total = (int)seconds;
+    if (total < 0) total = 0;
     int h = total / 3600;
     int m = (total % 3600) / 60;
     int s = total % 60;
@@ -161,6 +161,8 @@ void CloseVideo(VideoPlayerState& state) {
     state.ab_loop_enabled = false;
     state.ab_point_a = -1.0;
     state.ab_point_b = -1.0;
+    state.video_stream_idx = -1;
+    state.audio_stream_idx = -1;
     state.details = MediaDetails();
 }
 
@@ -318,58 +320,59 @@ void AdvancePlayback(VideoPlayerState& state) {
     Uint64 current_ticks = SDL_GetTicks64();
     double base_fps = (state.details.fps > 0) ? state.details.fps : 25.0;
     double frame_delay = (1000.0 / (base_fps * state.playback_speed));
-    bool need_video = state.frame_step_requested || ((current_ticks - state.last_frame_ticks) >= frame_delay);
 
-    // A-B Loop Processing
+    bool need_video_frame = state.frame_step_requested || ((current_ticks - state.last_frame_ticks) >= frame_delay);
+
+    // A-B Loop Переход
     if (state.ab_loop_enabled && state.ab_point_b > state.ab_point_a && state.current_time_sec >= state.ab_point_b) {
         SeekTo(state, state.ab_point_a);
         return;
     }
 
-    AVPacket packet;
-    int read_res = av_read_frame(state.fmt_ctx, &packet);
-
-    if (read_res < 0) { // Конец файла
-        if (state.loop_mode == LOOP_ONE) {
-            SeekTo(state, 0.0);
-            return;
-        } else {
-            state.is_paused = true;
-            return;
-        }
+    // Буферизация звука предохраняет от лагов
+    if (!need_video_frame && state.audio_stream_idx >= 0 && SDL_GetQueuedAudioSize(state.audio_dev) > 44100 * 2) {
+        return;
     }
 
-    if (packet.stream_index == state.video_stream_idx && need_video) {
-        if (avcodec_send_packet(state.video_codec_ctx, &packet) >= 0) {
-            if (avcodec_receive_frame(state.video_codec_ctx, state.av_frame) >= 0) {
-                sws_scale(
-                    state.sws_ctx,
-                    (const uint8_t* const*)state.av_frame->data,
-                    state.av_frame->linesize,
-                    0, state.details.height,
-                    state.frame_rgba->data,
-                    state.frame_rgba->linesize
-                );
+    AVPacket packet;
+    bool video_rendered = false;
+    int max_reads = 64; // Предотвращает зависание UI при чтении
 
-                SDL_UpdateTexture(state.texture, nullptr, state.frame_rgba->data[0], state.frame_rgba->linesize[0]);
+    while (max_reads-- > 0 && av_read_frame(state.fmt_ctx, &packet) >= 0) {
+        // Видео Поток
+        if (packet.stream_index == state.video_stream_idx) {
+            if (avcodec_send_packet(state.video_codec_ctx, &packet) >= 0) {
+                while (avcodec_receive_frame(state.video_codec_ctx, state.av_frame) >= 0) {
+                    if (need_video_frame && !video_rendered) {
+                        sws_scale(
+                            state.sws_ctx,
+                            (const uint8_t* const*)state.av_frame->data,
+                            state.av_frame->linesize,
+                            0, state.details.height,
+                            state.frame_rgba->data,
+                            state.frame_rgba->linesize
+                        );
 
-                if (state.av_frame->pts != AV_NOPTS_VALUE) {
-                    AVStream* stream = state.fmt_ctx->streams[state.video_stream_idx];
-                    state.current_time_sec = state.av_frame->pts * av_q2d(stream->time_base);
-                }
+                        SDL_UpdateTexture(state.texture, nullptr, state.frame_rgba->data[0], state.frame_rgba->linesize[0]);
 
-                state.last_frame_ticks = current_ticks;
-                need_video = false;
+                        if (state.av_frame->pts != AV_NOPTS_VALUE) {
+                            AVStream* stream = state.fmt_ctx->streams[state.video_stream_idx];
+                            state.current_time_sec = state.av_frame->pts * av_q2d(stream->time_base);
+                        }
 
-                if (state.frame_step_requested) {
-                    state.frame_step_requested = false;
-                    state.is_paused = true;
+                        state.last_frame_ticks = current_ticks;
+                        video_rendered = true;
+
+                        if (state.frame_step_requested) {
+                            state.frame_step_requested = false;
+                            state.is_paused = true;
+                        }
+                    }
                 }
             }
         }
-    }
-    else if (packet.stream_index == state.audio_stream_idx && state.audio_dev > 0 && !state.is_paused) {
-        if (SDL_GetQueuedAudioSize(state.audio_dev) < 44100 * 4 / 2) {
+        // Аудио Поток
+        else if (packet.stream_index == state.audio_stream_idx && state.audio_dev > 0 && !state.is_paused) {
             if (avcodec_send_packet(state.audio_codec_ctx, &packet) >= 0) {
                 while (avcodec_receive_frame(state.audio_codec_ctx, state.audio_frame) >= 0) {
                     uint8_t* out_buf = nullptr;
@@ -377,42 +380,45 @@ void AdvancePlayback(VideoPlayerState& state) {
                         swr_get_delay(state.swr_ctx, state.audio_codec_ctx->sample_rate) + state.audio_frame->nb_samples,
                         44100, state.audio_codec_ctx->sample_rate, AV_ROUND_UP
                     );
-                    av_samples_alloc(&out_buf, nullptr, 2, out_samples, AV_SAMPLE_FMT_S16, 0);
 
-                    int converted = swr_convert(
-                        state.swr_ctx, &out_buf, out_samples,
-                        (const uint8_t**)state.audio_frame->data, state.audio_frame->nb_samples
-                    );
+                    if (out_samples > 0) {
+                        av_samples_alloc(&out_buf, nullptr, 2, out_samples, AV_SAMPLE_FMT_S16, 0);
 
-                    if (converted > 0) {
-                        int data_size = converted * 2 * sizeof(int16_t);
-                        int16_t* samples = (int16_t*)out_buf;
-                        int total_samples = converted * 2;
+                        int converted = swr_convert(
+                            state.swr_ctx, &out_buf, out_samples,
+                            (const uint8_t**)state.audio_frame->data, state.audio_frame->nb_samples
+                        );
 
-                        float cur_vol = state.is_muted ? 0.0f : state.volume;
-                        float peak = 0.0f;
+                        if (converted > 0) {
+                            int data_size = converted * 2 * sizeof(int16_t);
+                            int16_t* samples = (int16_t*)out_buf;
+                            int total_samples = converted * 2;
 
-                        for (int i = 0; i < total_samples; ++i) {
-                            int val = (int)(samples[i] * cur_vol);
-                            // Soft limiter для предотвращения дикого хрипа при 200%
-                            if (val > 32767) val = 32767;
-                            if (val < -32768) val = -32768;
-                            samples[i] = (int16_t)val;
+                            float cur_vol = state.is_muted ? 0.0f : state.volume;
+                            float peak = 0.0f;
 
-                            float abs_sample = std::abs(val) / 32768.0f;
-                            if (abs_sample > peak) peak = abs_sample;
+                            for (int i = 0; i < total_samples; ++i) {
+                                int val = (int)(samples[i] * cur_vol);
+                                if (val > 32767) val = 32767;
+                                if (val < -32768) val = -32768;
+                                samples[i] = (int16_t)val;
+
+                                float abs_sample = std::abs(val) / 32768.0f;
+                                if (abs_sample > peak) peak = abs_sample;
+                            }
+
+                            state.audio_peak_level = peak;
+                            SDL_QueueAudio(state.audio_dev, out_buf, data_size);
                         }
-
-                        state.audio_peak_level = peak;
-                        SDL_QueueAudio(state.audio_dev, out_buf, data_size);
+                        if (out_buf) av_freep(&out_buf);
                     }
-                    if (out_buf) av_freep(&out_buf);
                 }
             }
         }
-    }
 
-    av_packet_unref(&packet);
+        av_packet_unref(&packet);
+        if (video_rendered) break;
+    }
 }
 
 SDL_Rect CalculateViewport(int win_w, int win_h, int vid_w, int vid_h, AspectRatioMode mode) {
@@ -465,7 +471,7 @@ int main(int argc, char* argv[]) {
     style.WindowRounding = 8.0f;
     style.FrameRounding = 5.0f;
     style.PopupRounding = 5.0f;
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.07f, 0.08f, 0.11f, 0.88f);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.07f, 0.08f, 0.11f, 0.90f);
     style.Colors[ImGuiCol_Header] = ImVec4(0.22f, 0.28f, 0.40f, 0.85f);
     style.Colors[ImGuiCol_Button] = ImVec4(0.20f, 0.26f, 0.38f, 1.00f);
     style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.30f, 0.38f, 0.55f, 1.00f);
@@ -592,7 +598,7 @@ int main(int argc, char* argv[]) {
         bool ui_visible = (!player.is_open || player.is_paused || (SDL_GetTicks() - last_mouse_motion < 3000));
 
         if (ui_visible) {
-            // Главное меню
+            // Главная панель меню
             if (ImGui::BeginMainMenuBar()) {
                 if (ImGui::BeginMenu("Media")) {
                     if (ImGui::MenuItem("Open File...", "Ctrl+O")) {
@@ -666,7 +672,7 @@ int main(int argc, char* argv[]) {
                 ImGui::EndMainMenuBar();
             }
 
-            // Нижняя супер-панель управления
+            // Нижняя панель управления
             if (player.is_open) {
                 ImGui::SetNextWindowPos(ImVec2(10.0f, (float)win_h - 95.0f));
                 ImGui::SetNextWindowSize(ImVec2((float)win_w - 20.0f, 85.0f));
@@ -682,7 +688,7 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopItemWidth();
 
-                // Кнопки управления
+                // Кнопки
                 if (ImGui::Button(player.is_paused ? "  Play  " : " Pause ")) {
                     player.is_paused = !player.is_paused;
                     if (player.audio_dev > 0) SDL_PauseAudioDevice(player.audio_dev, player.is_paused ? 1 : 0);
@@ -702,7 +708,7 @@ int main(int argc, char* argv[]) {
                     SaveSnapshot(player);
                 }
 
-                // A-B Loop кнопки
+                // A-B Loop
                 ImGui::SameLine(0, 15.0f);
                 if (ImGui::Button(player.ab_point_a >= 0 ? "[A]" : " A ")) {
                     player.ab_point_a = player.current_time_sec;
@@ -727,7 +733,7 @@ int main(int argc, char* argv[]) {
                 ImGui::SameLine(0, 15.0f);
                 ImGui::Text("%s / %s", FormatTime(player.current_time_sec).c_str(), FormatTime(player.duration_sec).c_str());
 
-                // Mute, Громкость до 200% и VU-метр
+                // Mute, Volume и VU Meter
                 ImGui::SameLine(0, 20.0f);
                 if (ImGui::Button(player.is_muted ? "Unmute" : " Mute ")) {
                     player.is_muted = !player.is_muted;
@@ -743,7 +749,6 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopItemWidth();
 
-                // Простой VU Meter индикатор
                 ImGui::SameLine();
                 ImGui::ProgressBar(player.audio_peak_level, ImVec2(35.0f, 0.0f), "");
 
@@ -751,7 +756,22 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Окно ввода времени (Jump to time)
+        // Контекстное меню по правому клику мыши
+        if (ImGui::BeginPopupContextVoid("PlayerContextMenu")) {
+            if (ImGui::MenuItem(player.is_paused ? "Play" : "Pause", "Space", false, player.is_open)) {
+                player.is_paused = !player.is_paused;
+            }
+            if (ImGui::MenuItem("Take Snapshot", "Shift+S", false, player.is_open)) {
+                SaveSnapshot(player);
+            }
+            if (ImGui::MenuItem("Fullscreen", "F", is_fullscreen)) {
+                is_fullscreen = !is_fullscreen;
+                SDL_SetWindowFullscreen(window, is_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+            }
+            ImGui::EndPopup();
+        }
+
+        // Модальное окно точного перехода
         if (show_jump_modal) {
             ImGui::OpenPopup("Jump To Time");
             show_jump_modal = false;
@@ -804,7 +824,7 @@ int main(int argc, char* argv[]) {
             ImGui::End();
         }
 
-        // Отрисовка OSD (Наэкранного меню)
+        // Отрисовка OSD
         if (SDL_GetTicks() < player.osd.expire_ticks && !player.osd.text.empty()) {
             ImGui::SetNextWindowPos(ImVec2((float)win_w - 220.0f, 40.0f));
             ImGui::SetNextWindowSize(ImVec2(200.0f, 0.0f));
