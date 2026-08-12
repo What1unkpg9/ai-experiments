@@ -11,21 +11,34 @@ jobs:
 
     defaults:
       run:
-        working-directory: ./video-player  # Работаем строго внутри этой папки
+        working-directory: ./video-player
 
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
+    - name: Cache vcpkg dependencies
+      uses: actions/cache@v4
+      with:
+        path: C:/vcpkg/installed
+        key: vcpkg-${{ runner.os }}-${{ hashFiles('video-player/CMakeLists.txt') }}
+
+    - name: Create Release-Only Triplet
+      run: |
+        @'
+        set(VCPKG_TARGET_ARCHITECTURE x64)
+        set(VCPKG_CRT_LINKAGE dynamic)
+        set(VCPKG_LIBRARY_LINKAGE dynamic)
+        set(VCPKG_BUILD_TYPE release)
+        '@ | Out-File -FilePath C:\vcpkg\triplets\x64-windows-rel.cmake -Encoding ascii
+
     - name: Install Dependencies via vcpkg
       run: |
-        vcpkg install ffmpeg[avcodec,avformat,swscale]:x64-windows sdl2:x64-windows imgui:x64-windows
-      env:
-        VCPKG_BUILD_TYPE: release
+        vcpkg install ffmpeg[avcodec,avformat,swscale]:x64-windows-rel sdl2:x64-windows-rel imgui:x64-windows-rel
 
     - name: Configure CMake
       run: |
-        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -A x64
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-rel -A x64
 
     - name: Build Release
       run: cmake --build build --config Release
