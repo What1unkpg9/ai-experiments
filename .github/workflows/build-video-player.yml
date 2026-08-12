@@ -1,0 +1,37 @@
+name: Build C++ Video Player
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: ./video-player  # Работаем строго внутри этой папки
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Install Dependencies via vcpkg
+      run: |
+        vcpkg install ffmpeg[avcodec,avformat,swscale,avutil]:x64-windows sdl2:x64-windows imgui[sdl2-binding,sdl2-renderer-binding]:x64-windows
+
+    - name: Configure CMake
+      run: |
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -A x64
+
+    - name: Build Release
+      run: cmake --build build --config Release
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: VideoPlayer-Windows-x64
+        path: |
+          video-player/build/Release/*.exe
+          video-player/build/Release/*.dll
