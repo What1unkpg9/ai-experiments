@@ -19,7 +19,7 @@ jobs:
 
     - name: Install Dependencies via vcpkg
       run: |
-        vcpkg install ffmpeg[avcodec,avformat,swscale,avutil]:x64-windows sdl2:x64-windows imgui[sdl2-binding,sdl2-renderer-binding]:x64-windows
+        vcpkg install ffmpeg[avcodec,avformat,swscale,avutil]:x64-windows sdl2:x64-windows imgui[sdl2-binding]:x64-windows
 
     - name: Configure CMake
       run: |
