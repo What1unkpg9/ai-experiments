@@ -74,7 +74,10 @@ int main(int argc, char* argv[]) {
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
-        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+        
+        // Исправлено: передаём второй аргумент renderer
+        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+        
         SDL_RenderPresent(renderer);
     }
 
