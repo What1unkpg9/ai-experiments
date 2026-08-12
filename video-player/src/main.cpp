@@ -51,7 +51,6 @@ struct OSDMessage {
     Uint32 expire_ticks = 0;
 };
 
-// Глобальный формат GPU для коллбэка FFmpeg
 static enum AVPixelFormat g_hw_pix_fmt = AV_PIX_FMT_NONE;
 
 static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
@@ -76,7 +75,6 @@ struct VideoPlayerState {
 
     AspectRatioMode aspect_mode = ASPECT_AUTO;
 
-    // A-B Loop
     bool ab_loop_enabled = false;
     double ab_point_a = -1.0;
     double ab_point_b = -1.0;
@@ -86,19 +84,18 @@ struct VideoPlayerState {
     MediaDetails details;
     OSDMessage osd;
 
-    // FFmpeg Video & HW Contexts
     AVFormatContext* fmt_ctx = nullptr;
     AVCodecContext* video_codec_ctx = nullptr;
     AVBufferRef* hw_device_ctx = nullptr;
     int video_stream_idx = -1;
     SwsContext* sws_ctx = nullptr;
+    AVPixelFormat current_sws_fmt = AV_PIX_FMT_NONE;
     AVFrame* av_frame = nullptr;
-    AVFrame* sw_frame = nullptr; // Кадр в ОЗУ для HWAccel
+    AVFrame* sw_frame = nullptr;
     AVFrame* frame_rgba = nullptr;
     uint8_t* video_buffer = nullptr;
     SDL_Texture* texture = nullptr;
 
-    // FFmpeg Audio Contexts
     AVCodecContext* audio_codec_ctx = nullptr;
     int audio_stream_idx = -1;
     SwrContext* swr_ctx = nullptr;
@@ -156,6 +153,8 @@ void CloseVideo(VideoPlayerState& state) {
 
     if (state.texture) { SDL_DestroyTexture(state.texture); state.texture = nullptr; }
     if (state.sws_ctx) { sws_freeContext(state.sws_ctx); state.sws_ctx = nullptr; }
+    state.current_sws_fmt = AV_PIX_FMT_NONE;
+
     if (state.frame_rgba) { av_frame_free(&state.frame_rgba); }
     if (state.sw_frame) { av_frame_free(&state.sw_frame); }
     if (state.av_frame) { av_frame_free(&state.av_frame); }
@@ -183,16 +182,7 @@ bool OpenVideo(const char* filepath, VideoPlayerState& state, SDL_Renderer* rend
     if (avformat_find_stream_info(state.fmt_ctx, nullptr) < 0) return false;
 
     state.filepath = filepath;
-    
-    std::string raw_format = state.fmt_ctx->iformat->name ? state.fmt_ctx->iformat->name : "";
-    if (raw_format.find("mp4") != std::string::npos || raw_format.find("mov") != std::string::npos) {
-        state.details.container_name = "MP4 / MOV (MPEG-4)";
-    } else if (raw_format.find("matroska") != std::string::npos) {
-        state.details.container_name = "MKV (Matroska)";
-    } else {
-        state.details.container_name = state.fmt_ctx->iformat->long_name ? state.fmt_ctx->iformat->long_name : raw_format;
-    }
-
+    state.details.container_name = state.fmt_ctx->iformat->long_name ? state.fmt_ctx->iformat->long_name : state.fmt_ctx->iformat->name;
     state.details.bit_rate = state.fmt_ctx->bit_rate;
 
     if (state.fmt_ctx->duration != AV_NOPTS_VALUE) {
@@ -207,9 +197,8 @@ bool OpenVideo(const char* filepath, VideoPlayerState& state, SDL_Renderer* rend
             state.video_codec_ctx = avcodec_alloc_context3(codec);
             avcodec_parameters_to_context(state.video_codec_ctx, stream->codecpar);
 
-            // Настройка Hardware Acceleration (DXVA2 / D3D11VA / CUDA)
             g_hw_pix_fmt = AV_PIX_FMT_NONE;
-            AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_DXVA2; // Приоритет DXVA2 для Windows
+            AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_DXVA2;
             
             for (int i = 0;; i++) {
                 const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
@@ -231,25 +220,16 @@ bool OpenVideo(const char* filepath, VideoPlayerState& state, SDL_Renderer* rend
                 }
             }
 
-            state.video_codec_ctx->thread_count = 0; // Многопоточность как фоллбэк
+            state.video_codec_ctx->thread_count = 1; // 1 поток стабильнее для HW декодеров
 
             if (avcodec_open2(state.video_codec_ctx, codec, nullptr) >= 0) {
                 state.details.v_codec = codec->long_name ? codec->long_name : codec->name;
                 state.details.width = state.video_codec_ctx->width;
                 state.details.height = state.video_codec_ctx->height;
                 
-                const char* pix_fmt_name = av_get_pix_fmt_name(state.video_codec_ctx->pix_fmt);
-                state.details.pix_fmt = pix_fmt_name ? pix_fmt_name : "Hardware Format";
-
                 if (stream->avg_frame_rate.den > 0) {
                     state.details.fps = av_q2d(stream->avg_frame_rate);
                 }
-
-                state.sws_ctx = sws_getContext(
-                    state.details.width, state.details.height, AV_PIX_FMT_NV12, // Популярный промежуточный формат HW
-                    state.details.width, state.details.height, AV_PIX_FMT_RGBA,
-                    SWS_BILINEAR, nullptr, nullptr, nullptr
-                );
 
                 state.av_frame = av_frame_alloc();
                 state.sw_frame = av_frame_alloc();
@@ -332,6 +312,7 @@ void SeekTo(VideoPlayerState& state, double target_sec) {
     if (state.audio_codec_ctx) avcodec_flush_buffers(state.audio_codec_ctx);
     if (state.audio_dev > 0) SDL_ClearQueuedAudio(state.audio_dev);
     state.current_time_sec = target_sec;
+    state.last_frame_ticks = SDL_GetTicks64(); // Сброс таймера при перемотке
 }
 
 void SaveSnapshot(VideoPlayerState& state) {
@@ -363,42 +344,45 @@ void AdvancePlayback(VideoPlayerState& state) {
 
     Uint64 current_ticks = SDL_GetTicks64();
     double base_fps = (state.details.fps > 0) ? state.details.fps : 25.0;
-    double frame_delay = (1000.0 / (base_fps * state.playback_speed));
+    double frame_delay_ms = 1000.0 / (base_fps * state.playback_speed);
 
-    bool need_video_frame = state.frame_step_requested || ((current_ticks - state.last_frame_ticks) >= frame_delay);
+    // Главная фиксация: если время для кадра еще не прошло — не читаем видео из файла!
+    bool need_video_frame = state.frame_step_requested || ((current_ticks - state.last_frame_ticks) >= frame_delay_ms);
 
     if (state.ab_loop_enabled && state.ab_point_b > state.ab_point_a && state.current_time_sec >= state.ab_point_b) {
         SeekTo(state, state.ab_point_a);
         return;
     }
 
+    if (!need_video_frame) return;
+
     AVPacket packet;
-    bool video_rendered = false;
-    int max_reads = 32; 
+    int max_reads = 100;
 
     while (max_reads-- > 0 && av_read_frame(state.fmt_ctx, &packet) >= 0) {
         if (packet.stream_index == state.video_stream_idx) {
             if (avcodec_send_packet(state.video_codec_ctx, &packet) >= 0) {
                 while (avcodec_receive_frame(state.video_codec_ctx, state.av_frame) >= 0) {
-                    if (need_video_frame && !video_rendered) {
-                        AVFrame* render_frame = state.av_frame;
+                    AVFrame* render_frame = state.av_frame;
 
-                        // Передача из VRAM GPU в RAM если кадр декодирован аппаратно
-                        if (state.av_frame->format == g_hw_pix_fmt) {
-                            if (av_hwframe_transfer_data(state.sw_frame, state.av_frame, 0) >= 0) {
-                                render_frame = state.sw_frame;
-                            }
+                    if (state.av_frame->format == g_hw_pix_fmt) {
+                        if (av_hwframe_transfer_data(state.sw_frame, state.av_frame, 0) >= 0) {
+                            render_frame = state.sw_frame;
                         }
+                    }
 
-                        // Обновляем SwsContext при первой передаче под реальный формат
-                        if (!state.sws_ctx) {
-                            state.sws_ctx = sws_getContext(
-                                state.details.width, state.details.height, (AVPixelFormat)render_frame->format,
-                                state.details.width, state.details.height, AV_PIX_FMT_RGBA,
-                                SWS_BILINEAR, nullptr, nullptr, nullptr
-                            );
-                        }
+                    AVPixelFormat src_fmt = (AVPixelFormat)render_frame->format;
+                    if (!state.sws_ctx || state.current_sws_fmt != src_fmt) {
+                        if (state.sws_ctx) sws_freeContext(state.sws_ctx);
+                        state.sws_ctx = sws_getContext(
+                            state.details.width, state.details.height, src_fmt,
+                            state.details.width, state.details.height, AV_PIX_FMT_RGBA,
+                            SWS_BILINEAR, nullptr, nullptr, nullptr
+                        );
+                        state.current_sws_fmt = src_fmt;
+                    }
 
+                    if (state.sws_ctx) {
                         sws_scale(
                             state.sws_ctx,
                             (const uint8_t* const*)render_frame->data,
@@ -409,25 +393,29 @@ void AdvancePlayback(VideoPlayerState& state) {
                         );
 
                         SDL_UpdateTexture(state.texture, nullptr, state.frame_rgba->data[0], state.frame_rgba->linesize[0]);
-
-                        if (state.av_frame->pts != AV_NOPTS_VALUE) {
-                            AVStream* stream = state.fmt_ctx->streams[state.video_stream_idx];
-                            state.current_time_sec = state.av_frame->pts * av_q2d(stream->time_base);
-                        }
-
-                        state.last_frame_ticks = current_ticks;
-                        video_rendered = true;
-
-                        if (state.frame_step_requested) {
-                            state.frame_step_requested = false;
-                            state.is_paused = true;
-                        }
                     }
+
+                    if (state.av_frame->pts != AV_NOPTS_VALUE) {
+                        AVStream* stream = state.fmt_ctx->streams[state.video_stream_idx];
+                        state.current_time_sec = state.av_frame->pts * av_q2d(stream->time_base);
+                    } else {
+                        state.current_time_sec += (1.0 / base_fps);
+                    }
+
+                    state.last_frame_ticks = current_ticks;
+
+                    if (state.frame_step_requested) {
+                        state.frame_step_requested = false;
+                        state.is_paused = true;
+                    }
+
+                    av_packet_unref(&packet);
+                    return; // Отрисовали 1 кадр — сразу выходим!
                 }
             }
         }
         else if (packet.stream_index == state.audio_stream_idx && state.audio_dev > 0 && !state.is_paused) {
-            if (SDL_GetQueuedAudioSize(state.audio_dev) < 44100 * 4) {
+            if (SDL_GetQueuedAudioSize(state.audio_dev) < 44100 * 2 * 2) {
                 if (avcodec_send_packet(state.audio_codec_ctx, &packet) >= 0) {
                     while (avcodec_receive_frame(state.audio_codec_ctx, state.audio_frame) >= 0) {
                         uint8_t* out_buf = nullptr;
@@ -473,7 +461,6 @@ void AdvancePlayback(VideoPlayerState& state) {
         }
 
         av_packet_unref(&packet);
-        if (video_rendered) break;
     }
 }
 
@@ -528,11 +515,6 @@ int main(int argc, char* argv[]) {
     style.FrameRounding = 6.0f;
     style.PopupRounding = 6.0f;
     style.GrabRounding = 4.0f;
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.09f, 0.12f, 0.88f);
-    style.Colors[ImGuiCol_Header] = ImVec4(0.20f, 0.28f, 0.42f, 0.85f);
-    style.Colors[ImGuiCol_Button] = ImVec4(0.18f, 0.24f, 0.36f, 1.00f);
-    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.28f, 0.38f, 0.58f, 1.00f);
-    style.Colors[ImGuiCol_SliderGrab] = ImVec4(0.40f, 0.55f, 0.85f, 1.00f);
 
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
@@ -733,7 +715,7 @@ int main(int argc, char* argv[]) {
                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
                 float seek_pos = (float)player.current_time_sec;
-                ImGui::PushItemWidth(-1);
+                ImGui::PushItemWidth(-1.0f);
                 if (ImGui::SliderFloat("##time", &seek_pos, 0.0f, (float)player.duration_sec, "")) {
                     SeekTo(player, seek_pos);
                 }
@@ -788,13 +770,7 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::SameLine();
                 ImGui::PushItemWidth(100.0f);
-                if (player.volume > 1.0f) {
-                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.95f, 0.25f, 0.25f, 1.0f));
-                }
                 ImGui::SliderFloat("##vol", &player.volume, 0.0f, 2.0f, "%.0f%%");
-                if (player.volume > 1.0f) {
-                    ImGui::PopStyleColor();
-                }
                 ImGui::PopItemWidth();
 
                 ImGui::SameLine();
@@ -802,20 +778,6 @@ int main(int argc, char* argv[]) {
 
                 ImGui::End();
             }
-        }
-
-        if (ImGui::BeginPopupContextVoid("PlayerContextMenu")) {
-            if (ImGui::MenuItem(player.is_paused ? "Play" : "Pause", "Space", false, player.is_open)) {
-                player.is_paused = !player.is_paused;
-            }
-            if (ImGui::MenuItem("Take Snapshot", "Shift+S", false, player.is_open)) {
-                SaveSnapshot(player);
-            }
-            if (ImGui::MenuItem("Fullscreen", "F", is_fullscreen)) {
-                is_fullscreen = !is_fullscreen;
-                SDL_SetWindowFullscreen(window, is_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-            }
-            ImGui::EndPopup();
         }
 
         if (show_jump_modal) {
