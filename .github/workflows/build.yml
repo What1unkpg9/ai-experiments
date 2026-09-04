@@ -10,12 +10,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Заставляем все шаги выполняться внутри папки mini-os
+    defaults:
+      run:
+        working-directory: mini-os
+        
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install build dependencies
+        # Для установки пакетов возвращаем контекст в корень через cd ..
         run: |
+          cd ..
           sudo apt-get update
           sudo apt-get install -y gcc-multilib nasm xorriso grub-pc-bin mtools
 
@@ -49,5 +56,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: myos-iso
-          path: myos.iso
+          path: mini-os/myos.iso
           retention-days: 7
