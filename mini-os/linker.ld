@@ -3,12 +3,12 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x100000; /* 1 МБ — стандартное место загрузки ядра GRUB */
+    . = 0x100000; /* 1 MB */
 
     .text ALIGN(0x1000) :
     {
-        *(.multiboot)   /* Заголовок Multiboot должен быть в начале */
-        *(.text)        /* Код (.text из boot.o и kernel.o) */
+        *(.multiboot)
+        *(.text)
     }
 
     .rodata ALIGN(0x1000) :
