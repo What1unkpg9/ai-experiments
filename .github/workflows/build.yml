@@ -1,1 +1,61 @@
+# .github/workflows/build.yml
+name: Build MyOS ISO
 
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # ВАЖНО: Указываем рабочую директорию, где лежат исходники
+    defaults:
+      run:
+        working-directory: mini-os
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib nasm xorriso grub-pc-bin mtools
+
+      # Теперь все команды выполняются внутри ./mini-os
+      - name: Compile Assembly (boot.asm -> boot.o)
+        run: nasm -f elf32 boot.asm -o boot.o
+
+      - name: Compile C Kernel (kernel.c -> kernel.o)
+        run: gcc -m32 -ffreestanding -c kernel.c -o kernel.o
+
+      - name: Link Kernel (boot.o + kernel.o -> kernel.bin)
+        run: ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o
+
+      - name: Verify Multiboot Header
+        run: |
+          if grub-file --is-x86-multiboot kernel.bin; then
+            echo "Multiboot header verified OK."
+          else
+            echo "ERROR: Invalid Multiboot header!" && exit 1
+          fi
+
+      - name: Prepare ISO directory structure
+        run: |
+          mkdir -p iso_root/boot/grub
+          cp kernel.bin iso_root/boot/kernel.bin
+          cp grub.cfg iso_root/boot/grub/grub.cfg
+
+      - name: Create Bootable ISO (grub-mkrescue)
+        run: grub-mkrescue -o myos.iso iso_root
+
+      - name: Upload Artifact (myos.iso)
+        uses: actions/upload-artifact@v4
+        with:
+          name: myos-iso
+          # Артефакт создался в mini-os/myos.iso, указываем путь относительно корня репы
+          path: mini-os/myos.iso
+          retention-days: 7
