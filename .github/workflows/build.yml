@@ -1,0 +1,38 @@
+name: Build GMod Hand Tracker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build Windows EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --console --name GModHandTracker --collect-all mediapipe --collect-all cv2 --collect-submodules websockets hand_tracker.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: GModHandTracker-Windows
+          path: dist/GModHandTracker.exe
+          if-no-files-found: error
