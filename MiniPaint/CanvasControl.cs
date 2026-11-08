@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -31,11 +32,13 @@ public sealed class CanvasControl : Control
 
     public event EventHandler? DocumentChanged;
     public event EventHandler? DrawingColorChanged;
-
+    
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public DrawingTool ActiveTool { get; set; } = DrawingTool.Brush;
 
     private Color _drawingColor = Color.Black;
-
+    
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Color DrawingColor
     {
         get => _drawingColor;
@@ -46,7 +49,8 @@ public sealed class CanvasControl : Control
             DrawingColorChanged?.Invoke(this, EventArgs.Empty);
         }
     }
-
+    
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int BrushSize { get; set; } = 6;
 
     public int CanvasWidth => _bitmap.Width;
