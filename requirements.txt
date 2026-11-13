@@ -1,0 +1,5 @@
+opencv-python-headless==4.10.0.84
+flask==3.0.3
+sounddevice==0.4.7
+numpy==1.26.4
+pyinstaller==6.10.0
